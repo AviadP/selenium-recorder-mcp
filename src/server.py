@@ -1,6 +1,7 @@
 """MCP server for Selenium test recording."""
 
 import os
+import re
 import json
 from pathlib import Path
 from typing import Optional, Any
@@ -121,11 +122,10 @@ async def start_recording(arguments: dict) -> list[types.TextContent]:
     url = arguments.get("url")
     sensitive_selectors = arguments.get("sensitive_selectors", [])
 
-    chrome_path = os.environ.get(
-        "CHROME_PATH", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    )
+    # Playwright handles browser location automatically
+    headless = os.environ.get("HEADLESS", "false").lower() == "true"
 
-    recorder = CDPRecorder(chrome_path=chrome_path)
+    recorder = CDPRecorder(headless=headless)
     recorder.start_chrome(url=url)
     session_id = recorder.connect()
 
@@ -159,19 +159,28 @@ async def stop_recording(arguments: dict) -> list[types.TextContent]:
     if not session_id:
         raise ValueError("session_id is required")
 
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
+
     recorder = active_recorders.get(session_id)
     if not recorder:
         raise ValueError(f"No active recording found for session: {session_id}")
 
-    session_data = recorder.stop()
+    try:
+        session_data = recorder.stop()
 
-    processed_events = event_processor.process_events(session_data["events"])
-    session_data["events"] = processed_events
+        processed_events = event_processor.process_events(session_data["events"])
+        session_data["events"] = processed_events
 
-    file_path = storage.save_recording(session_data)
-
-    recorder.close()
-    del active_recorders[session_id]
+        file_path = storage.save_recording(session_data)
+    finally:
+        # Ensure cleanup happens even if processing fails
+        try:
+            recorder.close()
+        finally:
+            if session_id in active_recorders:
+                del active_recorders[session_id]
 
     return [
         types.TextContent(
@@ -195,6 +204,10 @@ async def get_recording(arguments: dict) -> list[types.TextContent]:
     session_id = arguments.get("session_id")
     if not session_id:
         raise ValueError("session_id is required")
+
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
 
     recording = storage.load_recording(session_id)
     if not recording:
@@ -221,6 +234,10 @@ async def analyze_recording(arguments: dict) -> list[types.TextContent]:
     session_id = arguments.get("session_id")
     if not session_id:
         raise ValueError("session_id is required")
+
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
 
     recording = storage.load_recording(session_id)
     if not recording:

@@ -20,7 +20,7 @@ def main():
 
     # Start recording
     print(f"Starting Chrome and recording session for: {url}")
-    recorder = CDPRecorder()
+    recorder = CDPRecorder(headless=False)  # Always visible for standalone mode
     recorder.start_chrome(url=url)
     session_id = recorder.connect()
 

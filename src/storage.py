@@ -1,5 +1,6 @@
 """Storage for recording sessions."""
 
+import re
 import json
 from pathlib import Path
 from datetime import datetime
@@ -19,6 +20,19 @@ class RecordingStorage:
         self.recordings_dir = Path(recordings_dir)
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
 
+    def _validate_session_id(self, session_id: str) -> None:
+        """
+        Validate session_id is proper UUID format (SECURITY FIX #2).
+
+        Args:
+            session_id (str): Session ID to validate.
+
+        Raises:
+            ValueError: If session_id is not valid UUID format.
+        """
+        if not re.match(r'^[a-f0-9-]{36}$', session_id):
+            raise ValueError("Invalid session_id format")
+
     def save_recording(self, session_data: dict, url: Optional[str] = None) -> str:
         """
         Save recording session to JSON file.
@@ -33,6 +47,9 @@ class RecordingStorage:
         session_id = session_data.get("session_id")
         if not session_id:
             raise ValueError("Session data must contain 'session_id'")
+
+        # Validate session_id format (security - prevent path traversal)
+        self._validate_session_id(session_id)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{session_id}_{timestamp}.json"
@@ -50,8 +67,14 @@ class RecordingStorage:
             },
         }
 
+        # Security: prevent saving excessively large files
+        MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+        data_str = json.dumps(recording_data, indent=2)
+        if len(data_str.encode()) > MAX_FILE_SIZE:
+            raise ValueError(f"Recording too large: {len(data_str)} bytes (max: {MAX_FILE_SIZE})")
+
         with open(filepath, "w") as f:
-            json.dump(recording_data, f, indent=2)
+            f.write(data_str)
 
         return str(filepath)
 
@@ -65,6 +88,9 @@ class RecordingStorage:
         Returns:
             dict: Recording data or None if not found.
         """
+        # Validate session_id format (security - prevent path traversal)
+        self._validate_session_id(session_id)
+
         pattern = f"{session_id}_*.json"
         matching_files = list(self.recordings_dir.glob(pattern))
 
@@ -82,17 +108,26 @@ class RecordingStorage:
             list[dict]: List of recording metadata.
         """
         recordings = []
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB for reading
 
         for filepath in self.recordings_dir.glob("*.json"):
-            with open(filepath, "r") as f:
-                data = json.load(f)
-                recordings.append({
-                    "session_id": data.get("session_id"),
-                    "url": data.get("url"),
-                    "start_time": data.get("start_time"),
-                    "event_count": data.get("metadata", {}).get("event_count", 0),
-                    "filepath": str(filepath),
-                })
+            # Security: skip excessively large files
+            if filepath.stat().st_size > MAX_FILE_SIZE:
+                continue
+
+            try:
+                with open(filepath, "r") as f:
+                    data = json.load(f)
+                    recordings.append({
+                        "session_id": data.get("session_id"),
+                        "url": data.get("url"),
+                        "start_time": data.get("start_time"),
+                        "event_count": data.get("metadata", {}).get("event_count", 0),
+                        "filepath": str(filepath),
+                    })
+            except (json.JSONDecodeError, OSError):
+                # Skip invalid files
+                continue
 
         return sorted(recordings, key=lambda x: x.get("start_time", ""), reverse=True)
 
@@ -106,6 +141,9 @@ class RecordingStorage:
         Returns:
             bool: True if deleted, False if not found.
         """
+        # Validate session_id format (security - prevent path traversal)
+        self._validate_session_id(session_id)
+
         pattern = f"{session_id}_*.json"
         matching_files = list(self.recordings_dir.glob(pattern))
 

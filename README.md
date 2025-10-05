@@ -68,32 +68,60 @@ Example output:
 
 ## Setup (MCP Server Integration)
 
-### 1. Configure Chrome Path (if needed)
+### Configure Claude Code MCP
 
-Set `CHROME_PATH` environment variable if Chrome is not in default location:
+**Method 1: Using `claude mcp add` command (Recommended)**
+
+From your terminal, run:
 
 ```bash
-export CHROME_PATH="/path/to/chrome"
+claude mcp add selenium-recorder \
+  --scope user \
+  -- /bin/zsh -lc '
+    cd /path/to/selenium-recorder-mcp &&
+    exec ./.venv/bin/python -m src.server
+  '
 ```
 
-**Default paths:**
+Replace `/path/to/selenium-recorder-mcp` with your actual installation directory.
+
+**If Chrome is not in the default location, add the `--env` flag:**
+
+```bash
+claude mcp add selenium-recorder \
+  --scope user \
+  --env CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  -- /bin/zsh -lc '
+    cd /path/to/selenium-recorder-mcp &&
+    exec ./.venv/bin/python -m src.server
+  '
+```
+
+**Default Chrome paths:**
 - macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
 - Linux: `/usr/bin/google-chrome`
 - Windows: `C:\Program Files\Google\Chrome\Application\chrome.exe`
 
-### 2. Configure Claude Code MCP
+**For bash users, replace `/bin/zsh -lc` with `/bin/bash -lc`**
+
+**Notes:**
+- `--scope user` makes it available across all your projects
+- The `-lc` flag ensures a login shell with proper environment setup
+- `exec` replaces the shell process with Python for cleaner process management
+
+---
+
+**Method 2: Manual JSON configuration (Alternative)**
 
 Add to your Claude Code MCP settings (`~/.claude/mcp_settings.json`):
-
-**Important:** Use absolute paths for the Python command to ensure it works from any directory.
 
 ```json
 {
   "mcpServers": {
     "selenium-recorder": {
-      "command": "/absolute/path/to/selenium-recorder-mcp/.venv/bin/python",
+      "command": "/path/to/selenium-recorder-mcp/.venv/bin/python",
       "args": ["-m", "src.server"],
-      "cwd": "/absolute/path/to/selenium-recorder-mcp",
+      "cwd": "/path/to/selenium-recorder-mcp",
       "env": {
         "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
       }
@@ -102,18 +130,7 @@ Add to your Claude Code MCP settings (`~/.claude/mcp_settings.json`):
 }
 ```
 
-**Example (macOS/Linux):**
-```json
-{
-  "mcpServers": {
-    "selenium-recorder": {
-      "command": "/Users/username/selenium-recorder-mcp/.venv/bin/python",
-      "args": ["-m", "src.server"],
-      "cwd": "/Users/username/selenium-recorder-mcp"
-    }
-  }
-}
-```
+**Important:** Use absolute paths for both `command` and `cwd` fields.
 
 ## Usage
 
