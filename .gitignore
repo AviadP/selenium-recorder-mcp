@@ -58,3 +58,7 @@ playwright-state/
 
 # Project-specific instructions
 CLAUDE.md
+
+# Migration documentation (keep for reference, don't track)
+MIGRATION_PLAN.md
+MIGRATION_SUMMARY.md

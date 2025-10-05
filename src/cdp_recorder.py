@@ -1,10 +1,14 @@
 """Chrome DevTools Protocol recorder for browser interactions."""
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional, Callable
 
-from playwright.sync_api import sync_playwright, Browser, Page, CDPSession
+from playwright.async_api import async_playwright, Browser, Page, CDPSession
+
+logger = logging.getLogger(__name__)
 
 
 class CDPRecorder:
@@ -25,11 +29,10 @@ class CDPRecorder:
         self.session_id: Optional[str] = None
         self.events: list[dict] = []
         self.start_time: Optional[datetime] = None
-        self.event_callback: Optional[Callable] = None
         self._pending_url: Optional[str] = None
         self.max_events = 10000  # Security: prevent disk fill attack
 
-    def start_chrome(self, url: Optional[str] = None) -> None:
+    async def start_chrome(self, url: Optional[str] = None) -> None:
         """
         Launch browser with playwright.
 
@@ -51,18 +54,18 @@ class CDPRecorder:
             if parsed.scheme and parsed.scheme not in ('http', 'https', 'data'):
                 raise ValueError(f"Invalid URL scheme: {parsed.scheme}. Only http/https/data allowed.")
 
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
             headless=self.headless,
             args=['--no-first-run', '--no-default-browser-check']
         )
-        self.page = self.browser.new_page()
+        self.page = await self.browser.new_page(ignore_https_errors=True)
 
         # Don't navigate yet - let connect() set up listeners first
         # Navigation will happen in connect() if URL was provided
         self._pending_url = url
 
-    def connect(self) -> str:
+    async def connect(self) -> str:
         """
         Setup event recording on existing page.
 
@@ -80,28 +83,28 @@ class CDPRecorder:
         self.events = []
 
         # Create CDP session for low-level DOM events
-        self.cdp_session = self.page.context.new_cdp_session(self.page)
+        self.cdp_session = await self.page.context.new_cdp_session(self.page)
 
-        self._enable_domains()
-        self._setup_event_listeners()
+        await self._enable_domains()
+        await self._setup_event_listeners()
 
         # Now navigate if URL was provided - listeners are ready
         if self._pending_url:
-            self.page.goto(self._pending_url)
+            await self.page.goto(self._pending_url)
             self._pending_url = None
 
         return self.session_id
 
-    def _enable_domains(self) -> None:
+    async def _enable_domains(self) -> None:
         """Enable necessary CDP domains for event capture."""
         # Only enable CDP domains (DOM)
         # High-level events (console, errors) don't need enabling in playwright
-        self.cdp_session.send("DOM.enable")
+        await self.cdp_session.send("DOM.enable")
 
         # Add binding for click tracking
-        self.page.expose_binding("recordClick", self._handle_click_binding)
+        await self.page.expose_binding("recordClick", self._handle_click_binding)
 
-    def _setup_event_listeners(self) -> None:
+    async def _setup_event_listeners(self) -> None:
         """Set up event listeners for recording."""
         # High-level playwright events (cleaner API)
         self.page.on("console", self._on_console_log)
@@ -115,7 +118,7 @@ class CDPRecorder:
         self.cdp_session.on("DOM.characterDataModified", self._on_character_data_modified)
 
         # Inject click tracking script
-        self._inject_click_tracker()
+        await self._inject_click_tracker()
 
     def _add_event(self, event_type: str, data: dict) -> None:
         """
@@ -139,16 +142,14 @@ class CDPRecorder:
         }
         self.events.append(event)
 
-        if self.event_callback:
-            self.event_callback(event)
-
     def _on_console_log(self, msg) -> None:
         """Handle console.log events."""
         # Extract args safely - use text representation to avoid async issues
         try:
             args = [str(arg) for arg in msg.args]
-        except:
-            args = [msg.text]  # Fallback to message text
+        except (AttributeError, TypeError, RuntimeError) as e:
+            # Fallback to message text if args extraction fails
+            args = [msg.text]
 
         self._add_event("console_log", {
             "level": msg.type,
@@ -168,7 +169,7 @@ class CDPRecorder:
 
     def _on_page_load(self) -> None:
         """Handle page load events - reinject click tracker."""
-        self._inject_click_tracker()
+        asyncio.create_task(self._inject_click_tracker())
 
     def _on_document_updated(self, params: dict = None) -> None:
         """Handle document updated events."""
@@ -208,7 +209,7 @@ class CDPRecorder:
         except json.JSONDecodeError:
             pass
 
-    def _inject_click_tracker(self) -> None:
+    async def _inject_click_tracker(self) -> None:
         """Inject JavaScript to track click events."""
         script = """
         (function() {
@@ -299,33 +300,13 @@ class CDPRecorder:
                 // Send click data via binding
                 window.recordClick(JSON.stringify(clickData));
             }, true);
-
-            console.log('[CDP Recorder] Click tracking initialized');
         })();
         """
 
         try:
-            self.page.evaluate(script)
+            await self.page.evaluate(script)
         except Exception as e:
-            print(f"Failed to inject click tracker: {e}")
-
-    def set_event_callback(self, callback: Callable) -> None:
-        """
-        Set callback to be called when events are recorded.
-
-        Args:
-            callback (Callable): Function to call with each event.
-        """
-        self.event_callback = callback
-
-    def get_events(self) -> list[dict]:
-        """
-        Get all recorded events.
-
-        Returns:
-            list[dict]: List of recorded events.
-        """
-        return self.events
+            logger.warning(f"Failed to inject click tracker: {e}")
 
     def stop(self) -> dict:
         """
@@ -346,7 +327,7 @@ class CDPRecorder:
 
         return session_data
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close browser and cleanup resources."""
         try:
             if self.cdp_session:
@@ -354,16 +335,16 @@ class CDPRecorder:
                 self.cdp_session = None
 
             if self.page:
-                self.page.close()
+                await self.page.close()
                 self.page = None
 
             if self.browser:
-                self.browser.close()
+                await self.browser.close()
                 self.browser = None
 
             if self.playwright:
-                self.playwright.stop()
+                await self.playwright.stop()
                 self.playwright = None
         except Exception as e:
             # Best effort cleanup - log but don't raise
-            print(f"Warning during cleanup: {e}")
+            logger.warning(f"Warning during cleanup: {e}")
