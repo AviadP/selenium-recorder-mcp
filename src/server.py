@@ -1,13 +1,12 @@
 """MCP server for Selenium test recording."""
 
 import os
+import re
 import json
-from pathlib import Path
 from typing import Optional, Any
 
 import mcp.types as types
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
 
 from .cdp_recorder import CDPRecorder
 from .event_processor import EventProcessor
@@ -59,13 +58,34 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_recording",
-            description="Get recording data by session ID.",
+            description="Get recording metadata by session ID. Returns event type breakdown and file path by default. Use filters (limit, event_types, offset, timestamps) to retrieve actual events.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "session_id": {
                         "type": "string",
                         "description": "Session ID to retrieve",
+                    },
+                    "event_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by event types (e.g., ['click', 'console_log']). If omitted, returns all types.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of events to return. If omitted, returns all events.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of events to skip before returning results (for pagination). Default: 0",
+                    },
+                    "from_timestamp": {
+                        "type": "string",
+                        "description": "ISO timestamp - only return events after this time",
+                    },
+                    "to_timestamp": {
+                        "type": "string",
+                        "description": "ISO timestamp - only return events before this time",
                     },
                 },
                 "required": ["session_id"],
@@ -121,13 +141,12 @@ async def start_recording(arguments: dict) -> list[types.TextContent]:
     url = arguments.get("url")
     sensitive_selectors = arguments.get("sensitive_selectors", [])
 
-    chrome_path = os.environ.get(
-        "CHROME_PATH", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    )
+    # Playwright handles browser location automatically
+    headless = os.environ.get("HEADLESS", "false").lower() == "true"
 
-    recorder = CDPRecorder(chrome_path=chrome_path)
-    recorder.start_chrome(url=url)
-    session_id = recorder.connect()
+    recorder = CDPRecorder(headless=headless)
+    await recorder.start_chrome(url=url)
+    session_id = await recorder.connect()
 
     active_recorders[session_id] = recorder
 
@@ -159,19 +178,28 @@ async def stop_recording(arguments: dict) -> list[types.TextContent]:
     if not session_id:
         raise ValueError("session_id is required")
 
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
+
     recorder = active_recorders.get(session_id)
     if not recorder:
         raise ValueError(f"No active recording found for session: {session_id}")
 
-    session_data = recorder.stop()
+    try:
+        session_data = recorder.stop()
 
-    processed_events = event_processor.process_events(session_data["events"])
-    session_data["events"] = processed_events
+        processed_events = event_processor.process_events(session_data["events"])
+        session_data["events"] = processed_events
 
-    file_path = storage.save_recording(session_data)
-
-    recorder.close()
-    del active_recorders[session_id]
+        file_path = storage.save_recording(session_data)
+    finally:
+        # Ensure cleanup happens even if processing fails
+        try:
+            await recorder.close()
+        finally:
+            if session_id in active_recorders:
+                del active_recorders[session_id]
 
     return [
         types.TextContent(
@@ -184,26 +212,91 @@ async def stop_recording(arguments: dict) -> list[types.TextContent]:
 
 async def get_recording(arguments: dict) -> list[types.TextContent]:
     """
-    Get recording data.
+    Get recording metadata or filtered events.
 
     Args:
-        arguments (dict): Tool arguments with session_id.
+        arguments (dict): Tool arguments with session_id and optional filters.
 
     Returns:
-        list[types.TextContent]: Recording data as JSON.
+        list[types.TextContent]: Recording data - metadata only by default, events if filters provided.
     """
     session_id = arguments.get("session_id")
     if not session_id:
         raise ValueError("session_id is required")
 
-    recording = storage.load_recording(session_id)
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
+
+    # Extract filter parameters
+    event_types = arguments.get("event_types")
+    limit = arguments.get("limit")
+    offset = arguments.get("offset", 0)
+    from_timestamp = arguments.get("from_timestamp")
+    to_timestamp = arguments.get("to_timestamp")
+
+    # Detect if any filters are provided
+    has_filters = any([
+        event_types,           # Non-empty list
+        limit is not None,     # Explicit limit (including 0)
+        from_timestamp,        # Timestamp provided
+        to_timestamp,          # Timestamp provided
+        offset > 0             # Positive offset
+    ])
+
+    # Load recording with or without events based on filters
+    recording = storage.load_filtered_recording(
+        session_id=session_id,
+        event_types=event_types,
+        limit=limit,
+        offset=offset,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        include_events=has_filters,
+    )
+
     if not recording:
         raise ValueError(f"Recording not found: {session_id}")
+
+    # Build appropriate summary based on response type
+    metadata = recording.get("metadata", {})
+    file_path = recording.get("file_path", "")
+
+    if "events" in recording:
+        # Events included - show filter summary
+        total = metadata.get("total_events", 0)
+        returned = metadata.get("returned_events", 0)
+        filters = metadata.get("filters_applied")
+
+        summary = f"Session: {session_id}\n"
+        summary += f"File: {file_path}\n"
+        summary += f"Events: {returned}/{total}\n"
+        if filters:
+            summary += f"Filters: {json.dumps(filters, indent=2)}\n"
+        summary += "\n"
+    else:
+        # Metadata only - show breakdown and usage instructions
+        total = metadata.get("total_events", 0)
+        breakdown = metadata.get("event_type_breakdown", {})
+
+        summary = f"Session: {session_id}\n"
+        summary += f"File: {file_path}\n"
+        summary += f"Total events: {total}\n\n"
+        summary += "Event type breakdown:\n"
+        for event_type, count in sorted(breakdown.items(), key=lambda x: -x[1]):
+            summary += f"  {event_type}: {count}\n"
+        summary += f"\nℹ️  Use filters to retrieve events:\n"
+        summary += f"   - limit: Max number of events to return\n"
+        summary += f"   - event_types: List of event types to include\n"
+        summary += f"   - offset: Skip first N events (pagination)\n"
+        summary += f"   - from_timestamp/to_timestamp: Time range filter\n"
+        summary += f"\nOr read the file directly: {file_path}\n"
+        summary += "\n"
 
     return [
         types.TextContent(
             type="text",
-            text=json.dumps(recording, indent=2),
+            text=summary + json.dumps(recording, indent=2),
         )
     ]
 
@@ -221,6 +314,10 @@ async def analyze_recording(arguments: dict) -> list[types.TextContent]:
     session_id = arguments.get("session_id")
     if not session_id:
         raise ValueError("session_id is required")
+
+    # Validate session_id format (security - prevent injection)
+    if not re.match(r'^[a-f0-9-]{36}$', session_id):
+        raise ValueError("Invalid session_id format")
 
     recording = storage.load_recording(session_id)
     if not recording:

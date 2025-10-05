@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Simple CLI wrapper for recording browser sessions."""
 
+import asyncio
 import sys
-import time
 from src.cdp_recorder import CDPRecorder
 from src.event_processor import EventProcessor
 from src.storage import RecordingStorage
 
-def main():
+async def main():
     if len(sys.argv) < 2:
         print("Usage: python record.py <url>")
         sys.exit(1)
@@ -20,9 +20,9 @@ def main():
 
     # Start recording
     print(f"Starting Chrome and recording session for: {url}")
-    recorder = CDPRecorder()
-    recorder.start_chrome(url=url)
-    session_id = recorder.connect()
+    recorder = CDPRecorder(headless=False)  # Always visible for standalone mode
+    await recorder.start_chrome(url=url)
+    session_id = await recorder.connect()
 
     print(f"\n✅ Recording started!")
     print(f"📝 Session ID: {session_id}")
@@ -42,7 +42,7 @@ def main():
 
     file_path = storage.save_recording(session_data, url=url)
 
-    recorder.close()
+    await recorder.close()
 
     print(f"\n✅ Recording saved to: {file_path}")
     print(f"📊 Total events: {len(processed_events)}")
@@ -57,4 +57,4 @@ def main():
     print(f"\n💾 Session ID: {session_id}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -8,8 +8,38 @@ MCP server for recording comprehensive browser interactions using Chrome DevTool
 - **Comprehensive Recording**: Captures DOM mutations, console logs, and JS errors
 - **Manual Interaction**: Record while you manually navigate and interact with browser
 - **Sensitive Field Masking**: Automatically masks password fields and other sensitive data
+- **Smart Filtering**: Query recordings by event type, time range, or pagination - prevents large context dumps
+- **Metadata-First**: See event breakdown before retrieving data - safe by default
 - **JSON Output**: Structured data for analysis and test generation
 - **Claude Code Integration**: Use via MCP tools in Claude Code
+
+## What's New
+
+### Smart Query Filtering (Breaking Change)
+
+The `get_recording` tool now returns **metadata only by default** to prevent large responses that can fill up Claude's context window.
+
+**Before:**
+```
+get_recording(session_id) → Returns all events (could be 70k+ tokens)
+```
+
+**Now:**
+```
+get_recording(session_id) → Returns metadata only (event breakdown, file path)
+get_recording(session_id, limit=50) → Returns first 50 events
+get_recording(session_id, event_types=["click"]) → Returns only click events
+```
+
+**Benefits:**
+- ✅ No more accidental context overflow warnings
+- ✅ See what's available before requesting data
+- ✅ Filter to exactly what you need
+- ✅ Paginate large recordings
+
+**Migration:** Add any filter parameter to get events (e.g., `limit`, `event_types`, `offset`)
+
+See [Querying Recordings with Filters](#querying-recordings-with-filters) for details.
 
 ## Installation
 
@@ -68,32 +98,60 @@ Example output:
 
 ## Setup (MCP Server Integration)
 
-### 1. Configure Chrome Path (if needed)
+### Configure Claude Code MCP
 
-Set `CHROME_PATH` environment variable if Chrome is not in default location:
+**Method 1: Using `claude mcp add` command (Recommended)**
+
+From your terminal, run:
 
 ```bash
-export CHROME_PATH="/path/to/chrome"
+claude mcp add selenium-recorder \
+  --scope user \
+  -- /bin/zsh -lc '
+    cd /path/to/selenium-recorder-mcp &&
+    exec ./.venv/bin/python -m src.server
+  '
 ```
 
-**Default paths:**
+Replace `/path/to/selenium-recorder-mcp` with your actual installation directory.
+
+**If Chrome is not in the default location, add the `--env` flag:**
+
+```bash
+claude mcp add selenium-recorder \
+  --scope user \
+  --env CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  -- /bin/zsh -lc '
+    cd /path/to/selenium-recorder-mcp &&
+    exec ./.venv/bin/python -m src.server
+  '
+```
+
+**Default Chrome paths:**
 - macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
 - Linux: `/usr/bin/google-chrome`
 - Windows: `C:\Program Files\Google\Chrome\Application\chrome.exe`
 
-### 2. Configure Claude Code MCP
+**For bash users, replace `/bin/zsh -lc` with `/bin/bash -lc`**
+
+**Notes:**
+- `--scope user` makes it available across all your projects
+- The `-lc` flag ensures a login shell with proper environment setup
+- `exec` replaces the shell process with Python for cleaner process management
+
+---
+
+**Method 2: Manual JSON configuration (Alternative)**
 
 Add to your Claude Code MCP settings (`~/.claude/mcp_settings.json`):
-
-**Important:** Use absolute paths for the Python command to ensure it works from any directory.
 
 ```json
 {
   "mcpServers": {
     "selenium-recorder": {
-      "command": "/absolute/path/to/selenium-recorder-mcp/.venv/bin/python",
+      "command": "/path/to/selenium-recorder-mcp/.venv/bin/python",
       "args": ["-m", "src.server"],
-      "cwd": "/absolute/path/to/selenium-recorder-mcp",
+      "cwd": "/path/to/selenium-recorder-mcp",
       "env": {
         "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
       }
@@ -102,18 +160,7 @@ Add to your Claude Code MCP settings (`~/.claude/mcp_settings.json`):
 }
 ```
 
-**Example (macOS/Linux):**
-```json
-{
-  "mcpServers": {
-    "selenium-recorder": {
-      "command": "/Users/username/selenium-recorder-mcp/.venv/bin/python",
-      "args": ["-m", "src.server"],
-      "cwd": "/Users/username/selenium-recorder-mcp"
-    }
-  }
-}
-```
+**Important:** Use absolute paths for both `command` and `cwd` fields.
 
 ## Usage
 
@@ -173,12 +220,34 @@ stop_recording with session_id "abc-123-def"
 
 #### `get_recording`
 
-Retrieve recording data.
+Retrieve recording metadata or filtered events.
 
 **Parameters:**
 - `session_id` (required): Session ID to retrieve
+- `event_types` (optional): Array of event types to filter (e.g., `["click", "console_log"]`)
+- `limit` (optional): Maximum number of events to return
+- `offset` (optional): Number of events to skip (for pagination)
+- `from_timestamp` (optional): ISO timestamp - only return events after this time
+- `to_timestamp` (optional): ISO timestamp - only return events before this time
 
-**Returns:** Full recording JSON
+**Returns:**
+- **Without filters**: Metadata only (event type breakdown, file path, total count) - prevents large responses
+- **With any filter**: Filtered events matching criteria
+
+**Examples:**
+```
+# Get metadata only (safe, no large dumps)
+get_recording with session_id "abc-123"
+
+# Get first 50 events
+get_recording with session_id "abc-123" and limit 50
+
+# Get only click events
+get_recording with session_id "abc-123" and event_types ["click"]
+
+# Get clicks and DOM changes
+get_recording with session_id "abc-123" and event_types ["click", "dom_attribute_modified"]
+```
 
 #### `analyze_recording`
 
@@ -207,20 +276,128 @@ Claude: [calls stop_recording]
 Recording stopped and saved to: recordings/550e8400-e29b-41d4-a716-446655440000_20250115_143022.json
 Total events recorded: 247
 
-You: Analyze the recording
+You: What's in the recording?
 
-Claude: [calls analyze_recording]
-Recording Analysis for 550e8400-e29b-41d4-a716-446655440000:
-- Total events: 247
-- Clicks: 12
-- DOM mutations: 189
-- Console logs: 52
-- JS errors: 6
-- Masked events: 3
+Claude: [calls get_recording with session_id only - no filters]
+Session: 550e8400-e29b-41d4-a716-446655440000
+File: recordings/550e8400-e29b-41d4-a716-446655440000_20250115_143022.json
+Total events: 247
 
-You: Generate a Selenium test from this recording
+Event type breakdown:
+  dom_attribute_modified: 89
+  console_log: 52
+  dom_set_child_nodes: 45
+  click: 12
+  dom_character_data_modified: 43
+  js_error: 6
 
-Claude: [reads recording, generates test code]
+ℹ️  Use filters to retrieve events (limit, event_types, offset, timestamps)
+Or read the file directly.
+
+You: Show me just the click events
+
+Claude: [calls get_recording with event_types=["click"]]
+Session: 550e8400-e29b-41d4-a716-446655440000
+Events: 12/247
+Filters: {"event_types": ["click"]}
+
+[Returns 12 click events with full details]
+
+You: Generate a Selenium test from the click events
+
+Claude: [uses the 12 click events to generate test code]
+```
+
+## Querying Recordings with Filters
+
+The `get_recording` tool now supports powerful filtering to prevent large context dumps and retrieve only the data you need.
+
+### Default Behavior (Metadata Only)
+
+**Without any filters, `get_recording` returns metadata only:**
+
+```
+get_recording with session_id "abc-123"
+```
+
+**Returns:**
+- Session information (URL, timestamps, file path)
+- Total event count
+- Event type breakdown (shows count per event type)
+- Usage instructions
+- **No events** - prevents accidentally filling context with large responses
+
+This is **safe by default** and helps you understand what's in the recording before requesting specific data.
+
+### Retrieving Events with Filters
+
+**To get actual events, use any filter parameter:**
+
+#### Limit Events (Pagination)
+```
+# First 50 events
+get_recording with session_id "abc-123" and limit 50
+
+# Next 50 events (pagination)
+get_recording with session_id "abc-123" and limit 50 and offset 50
+```
+
+#### Filter by Event Type
+```
+# Only clicks
+get_recording with session_id "abc-123" and event_types ["click"]
+
+# Clicks and DOM mutations
+get_recording with session_id "abc-123" and event_types ["click", "dom_attribute_modified", "dom_set_child_nodes"]
+
+# Exclude noisy console logs - get everything else
+get_recording with session_id "abc-123" and event_types ["click", "js_error", "dom_attribute_modified"]
+```
+
+#### Time Range Filtering
+```
+# Events after a specific time
+get_recording with session_id "abc-123" and from_timestamp "2025-01-15T14:30:00"
+
+# Events in a time window
+get_recording with session_id "abc-123" and from_timestamp "2025-01-15T14:30:00" and to_timestamp "2025-01-15T14:35:00"
+```
+
+#### Combined Filters
+```
+# Click events only, first 100
+get_recording with session_id "abc-123" and event_types ["click"] and limit 100
+
+# Recent errors only
+get_recording with session_id "abc-123" and event_types ["js_error"] and from_timestamp "2025-01-15T14:30:00"
+```
+
+### Filter Extensibility
+
+Filters are **event-type agnostic** and work with any event type:
+- Current event types: `click`, `console_log`, `js_error`, `dom_attribute_modified`, `dom_set_child_nodes`, `dom_character_data_modified`, `document_updated`
+- When new event types are added (e.g., `window_resize`, `network_request`), they're **immediately filterable** with no code changes
+- Just use the event type name in the `event_types` array
+
+### Typical Workflow
+
+1. **Get overview** - Call without filters to see event breakdown
+2. **Filter what you need** - Request specific event types or ranges
+3. **Paginate if needed** - Use `limit` and `offset` for large result sets
+4. **Generate/analyze** - Use filtered data for test generation or analysis
+
+**Example:**
+```
+# Step 1: What's in the recording?
+get_recording with session_id "abc-123"
+→ Shows: 514 events (click: 45, console_log: 320, js_error: 12, ...)
+
+# Step 2: I only care about user interactions
+get_recording with session_id "abc-123" and event_types ["click"]
+→ Returns: 45 click events
+
+# Step 3: Generate test from clicks
+[Claude uses 45 click events to generate Selenium test]
 ```
 
 ## Output Format
